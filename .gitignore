@@ -1,0 +1,56 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Caches and environments
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyTorch & HuggingFace models/cache/weights
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.checkpoint.pt
+
+# Large dataset archives & raw data files (TREC benchmark)
+trec_data.zip
+trec_project.zip
+data/*
+!data/README.md
+!data/.gitkeep
+
+# Evaluation run outputs (TREC run files)
+results/*.trec
+!results/README.md
+!results/.gitkeep
+
+# Logs & temp files
+*.log
+scratch/
+ai_conversation_context/
+
+# IDE & OS files
+.DS_Store
+.idea/
+.vscode/
