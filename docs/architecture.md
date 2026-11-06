@@ -64,3 +64,4 @@ Because each query has 150 candidate LLM rows in the dataset (48,300 total rows 
 We enforce **5-Fold `GroupKFold` grouped strictly on `query_id`**:
 $$\text{Fold}_k \cap \text{Fold}_j = \emptyset \quad \forall \; q \in \mathcal{Q}$$
 All query-LLM pairs for a given query are confined to either the training or the evaluation partition, ensuring that evaluation metrics reflect performance on truly unseen queries.
+

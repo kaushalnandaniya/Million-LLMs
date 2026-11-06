@@ -17,6 +17,7 @@ def extract_discovery_data(metadata_file):
     discovery_stats = {}         # qid -> {llm_id -> {'mean_lp': x, 'min_lp': y, 'len': z}}
     llm_global_stats_raw = {}    # llm_id -> {'mean_lps': [], 'min_lps': [], 'lengths': []}
     llm_profiles = {}            # llm_id -> [list of responses]
+    llm_responses_raw = {}       # llm_id -> [individual response strings]
     
     for qid, q_data in data.items():
         q_text = q_data.get('query', '')
@@ -28,6 +29,7 @@ def extract_discovery_data(metadata_file):
             if llm_id not in llm_global_stats_raw:
                 llm_global_stats_raw[llm_id] = {'mean_lps': [], 'min_lps': [], 'lengths': []}
                 llm_profiles[llm_id] = []
+                llm_responses_raw[llm_id] = []
                 
             resp_text = res_obj.get('response', '')
             logprobs = res_obj.get('logprobs', [])
@@ -36,6 +38,7 @@ def extract_discovery_data(metadata_file):
             if resp_text and resp_text.lower() != "i don't know":
                 if len(llm_profiles[llm_id]) < 50:
                     llm_profiles[llm_id].append(resp_text)
+                    llm_responses_raw[llm_id].append(resp_text)
                     
             if logprobs:
                 valid_lps = [float(lp) for lp in logprobs if lp is not None]
@@ -66,9 +69,72 @@ def extract_discovery_data(metadata_file):
     for llm_id in llm_profiles:
         llm_profiles[llm_id] = " ".join(llm_profiles[llm_id])
         
-    return discovery_queries, discovery_stats, llm_global_stats, llm_profiles
+    return discovery_queries, discovery_stats, llm_global_stats, llm_profiles, llm_responses_raw
 
-def build_features(dev_queries_df, qrels_df, discovery_queries, discovery_stats, llm_global_stats, models, llm_profiles, k_nearest=5):
+def select_best_response_chunk(query_tokens, responses, max_chars=1200):
+    """
+    Selects the single most semantically relevant historical response from the LLM
+    instead of truncating an arbitrary concatenation of up to 50 responses.
+    """
+    if not responses:
+        return ""
+    if len(responses) == 1:
+        return responses[0][:max_chars]
+        
+    q_set = set(w.lower() for w in query_tokens if len(w) > 2)
+    best_idx = 0
+    best_overlap = -1
+    for i, resp in enumerate(responses):
+        resp_lower = resp.lower()
+        overlap = sum(1 for w in q_set if w in resp_lower)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_idx = i
+            
+    return responses[best_idx][:max_chars]
+
+def extract_query_domain_features(qtext):
+    """
+    Extracts 5 domain intent indicators (Coding, Math, Factual QA, Creative, Reasoning)
+    to enable the Learning-to-Rank engine to route queries based on domain specialization.
+    """
+    import re
+    q_lower = qtext.lower()
+    q_words = set(re.findall(r'[a-z0-9_+#\.]+', q_lower))
+    
+    # 1. Code / Programming
+    code_keywords = {
+        'code', 'python', 'java', 'c++', 'javascript', 'html', 'css', 'sql', 'function',
+        'def', 'class', 'bug', 'error', 'compile', 'debugging', 'algorithm', 'return',
+        'api', 'import', 'loop', 'syntax', 'array', 'string', 'int', 'null', 'script',
+        'regex', 'git', 'variable', 'method', 'pointer', 'docker', 'bash', 'terminal',
+        'quicksort', 'recursion', 'sorting', 'programming'
+    }
+    is_code = 1.0 if any(w in code_keywords for w in q_words) or any(k in q_lower for k in ['def ', 'import ', 'print(', 'console.log']) else 0.0
+    
+    # 2. Math / Quantitative
+    math_keywords = {
+        'math', 'calculate', 'solve', 'equation', 'probability', 'integral', 'matrix',
+        'theorem', 'sum', 'formula', 'geometry', 'algebra', 'prime', 'derivative',
+        'multiply', 'divide', 'ratio', 'percentage', 'fraction', 'logarithm', 'polynomial'
+    }
+    is_math = 1.0 if any(w in math_keywords for w in q_words) or any(c in q_lower for c in ['+', '=', '*', '^', 'sqrt']) else 0.0
+    
+    # 3. Factual QA / Lookup
+    factual_starters = ('who is', 'who was', 'where is', 'where was', 'when was', 'when did', 'what year', 'capital of', 'which year')
+    is_factual = 1.0 if any(q_lower.startswith(s) for s in factual_starters) or 'birthplace' in q_lower or 'history of' in q_lower else 0.0
+    
+    # 4. Creative Writing
+    creative_cues = {'write', 'story', 'poem', 'essay', 'draft', 'rewrite', 'compose', 'dialogue', 'lyrics', 'creative'}
+    is_creative = 1.0 if any(w in creative_cues for w in q_words) else 0.0
+    
+    # 5. Explanatory / Causal Reasoning
+    reasoning_cues = {'why', 'explain', 'how does', 'cause', 'reason', 'difference between', 'compare', 'analyze', 'mechanism'}
+    is_reasoning = 1.0 if any(w in reasoning_cues for w in q_words) or q_lower.startswith('why') or q_lower.startswith('how') else 0.0
+    
+    return [is_code, is_math, is_factual, is_creative, is_reasoning]
+
+def build_features(dev_queries_df, qrels_df, discovery_queries, discovery_stats, llm_global_stats, models, llm_profiles, llm_responses_raw=None, k_nearest=5):
     import torch
     from sentence_transformers import util
     from sentence_transformers.cross_encoder import CrossEncoder
@@ -96,7 +162,7 @@ def build_features(dev_queries_df, qrels_df, discovery_queries, discovery_stats,
         print(f"Found cached Gemma-2B scores at {cache_file}! Loading instantly...")
         qtext_llm_to_ce = torch.load(cache_file)
     else:
-        print("Precomputing Gemma-2B Reranker scores for all valid query-LLM pairs...")
+        print("Precomputing Gemma-2B Reranker scores for all valid query-LLM pairs using semantic chunk selection...")
         qtext_llm_to_ce = {}
         ce_inputs = []
         ce_keys = []
@@ -109,7 +175,13 @@ def build_features(dev_queries_df, qrels_df, discovery_queries, discovery_stats,
             llm_id = row['llm_id']
             if llm_id in llm_profiles:
                 ce_keys.append((qtext, llm_id))
-                ce_inputs.append((qtext, llm_profiles[llm_id][:1500])) # Truncate to fit sequence length
+                # Granular Response-Level Chunk Selection (fixes profile dilution)
+                if llm_responses_raw and llm_id in llm_responses_raw:
+                    q_toks = qtext.lower().split()
+                    best_chunk = select_best_response_chunk(q_toks, llm_responses_raw[llm_id], max_chars=1200)
+                    ce_inputs.append((qtext, best_chunk))
+                else:
+                    ce_inputs.append((qtext, llm_profiles[llm_id][:1500])) # Truncate fallback
                 
         print(f"Scoring {len(ce_inputs)} pairs using Gemma-2B Reranker (balanced across BOTH GPUs)...")
         
@@ -264,6 +336,7 @@ def build_features(dev_queries_df, qrels_df, discovery_queries, discovery_stats,
         global_len = global_stats['len']
         
         q_len = len(qtext.split())
+        domain_feats = extract_query_domain_features(qtext)
         
         feature_vec = sim_scores + [
             bm25_score,
@@ -278,7 +351,7 @@ def build_features(dev_queries_df, qrels_df, discovery_queries, discovery_stats,
             q_len,
             avg_mean_lp - global_mean_lp,
             avg_length - global_len
-        ]
+        ] + domain_feats
         
         features.append(feature_vec)
         labels.append(label)
@@ -303,7 +376,7 @@ def run_improved_router():
     
     qrels_df = pd.read_csv(f'{data_dir}/llm_dev_qrels.txt', sep=' ', names=['query_id', 'zero', 'llm_id', 'expertise_score'], dtype={'query_id': str, 'llm_id': str})
     
-    discovery_queries, discovery_stats, llm_global_stats, llm_profiles = extract_discovery_data(f'{data_dir}/llm_discovery_metadata.json')
+    discovery_queries, discovery_stats, llm_global_stats, llm_profiles, llm_responses_raw = extract_discovery_data(f'{data_dir}/llm_discovery_metadata.json')
     
     print("Initializing Multi-Embedding Ensembles...")
     models = {
@@ -312,7 +385,7 @@ def run_improved_router():
         'e5': SentenceTransformer('intfloat/e5-large-v2')
     }
     
-    X, y, groups = build_features(dev_queries_df, qrels_df, discovery_queries, discovery_stats, llm_global_stats, models, llm_profiles, k_nearest=5)
+    X, y, groups = build_features(dev_queries_df, qrels_df, discovery_queries, discovery_stats, llm_global_stats, models, llm_profiles, llm_responses_raw=llm_responses_raw, k_nearest=5)
     
     print("--- Training XGBoost Ranker (Learning-to-Rank) with GroupKFold ---")
     gkf = GroupKFold(n_splits=5)

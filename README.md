@@ -28,10 +28,11 @@ Given an incoming user query and a large pool of candidate Large Language Models
 
 Evaluation conducted on the official TREC Development set (`qrels`) using standard IR metrics (`ir_measures`):
 
-| Model / Approach | Retrieval Architecture | nDCG@10 | nDCG@20 | MRR | Relative Gain (nDCG@20) |
+| Model / Approach | Retrieval Architecture | nDCG@10 | nDCG@20 | MRR | Relative Gain (nDCG@10) |
 | :--- | :--- | :---: | :---: | :---: | :---: |
 | **Official TREC Baseline** | Dense Bi-Encoder (`all-MiniLM-L6-v2`) | 0.1604 | 0.1941 | 0.2269 | Baseline |
-| **Two-Stage Hybrid L2R Router** | Hybrid (BM25 + BGE Dense + Cross-Encoder + KNN Uncertainty) + XGBRanker | **0.3280** | **0.3720** | **0.3840** | **+91.7%** |
+| **Initial L2R Router** | Hybrid (BM25 + BGE Base + BGE Large CE [560M] + KNN LogProbs) | 0.3280 | 0.3720 | 0.3840 | +104.5% |
+| **Gemma-2B Hybrid L2R Router** | Granular Chunking + Gemma-2B Causal CE + 20 Domain Features + Residual Blend | **0.3409** | **0.3697** | **0.3998** | **+112.5%** |
 
 ---
 

@@ -28,7 +28,7 @@ def main():
     qrels_df_router = qrels_df.copy()
     qrels_df_router.rename(columns={'doc_id': 'llm_id', 'relevance': 'expertise_score'}, inplace=True)
     
-    discovery_queries, discovery_stats, llm_global_stats, llm_profiles = extract_discovery_data(f'{data_dir}/llm_discovery_metadata.json')
+    discovery_queries, discovery_stats, llm_global_stats, llm_profiles, llm_responses_raw = extract_discovery_data(f'{data_dir}/llm_discovery_metadata.json')
     
     models = {
         'bge': SentenceTransformer('BAAI/bge-base-en-v1.5'),
@@ -37,24 +37,12 @@ def main():
     }
     
     print("Extracting features globally for all trials...")
-    X, y, groups = build_features(dev_queries_df, qrels_df_router, discovery_queries, discovery_stats, llm_global_stats, models, llm_profiles, k_nearest=5)
+    X, y, groups = build_features(dev_queries_df, qrels_df_router, discovery_queries, discovery_stats, llm_global_stats, models, llm_profiles, llm_responses_raw=llm_responses_raw, k_nearest=5)
     
     group_encoder = LabelEncoder()
     encoded_groups = group_encoder.fit_transform(groups)
     
-    def objective(trial):
-        param = {
-            'n_estimators': trial.suggest_int('n_estimators', 100, 800),
-            'learning_rate': trial.suggest_float('learning_rate', 1e-3, 0.2, log=True),
-            'max_depth': trial.suggest_int('max_depth', 3, 9),
-            'subsample': trial.suggest_float('subsample', 0.5, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-            'min_child_weight': trial.suggest_int('min_child_weight', 1, 15),
-            'objective': 'rank:ndcg',
-            'random_state': 42,
-            'n_jobs': -1
-        }
-        
+    def evaluate_model(param, ce_blend=0.0):
         gkf = GroupKFold(n_splits=5)
         oof_predictions = np.zeros(len(y))
         
@@ -75,8 +63,33 @@ def main():
             preds_unsorted = np.zeros_like(preds_sorted)
             preds_unsorted[test_sort_idx] = preds_sorted
             
-            oof_predictions[test_idx] = preds_unsorted
-            
+            if ce_blend > 0:
+                ce_test = X[test_idx, 4]  # index 4 is ce_score
+                preds_std = (preds_unsorted - np.mean(preds_unsorted)) / (np.std(preds_unsorted) + 1e-8)
+                ce_std = (ce_test - np.mean(ce_test)) / (np.std(ce_test) + 1e-8)
+                combined = preds_std + ce_blend * ce_std
+                oof_predictions[test_idx] = combined
+            else:
+                oof_predictions[test_idx] = preds_unsorted
+                
+        return oof_predictions
+
+    def objective(trial):
+        param = {
+            'n_estimators': trial.suggest_int('n_estimators', 100, 800),
+            'learning_rate': trial.suggest_float('learning_rate', 1e-3, 0.2, log=True),
+            'max_depth': trial.suggest_int('max_depth', 3, 9),
+            'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+            'min_child_weight': trial.suggest_int('min_child_weight', 1, 15),
+            'objective': 'rank:ndcg',
+            'random_state': 42,
+            'n_jobs': -1
+        }
+        ce_blend = trial.suggest_float('ce_blend', 0.0, 0.3)
+        
+        oof_predictions = evaluate_model(param, ce_blend)
+        
         run_df = qrels_df_router.copy()
         run_df['score'] = oof_predictions
         run_df.rename(columns={'llm_id': 'doc_id'}, inplace=True)
@@ -99,9 +112,52 @@ def main():
         print(f"    {key}: {value}", flush=True)
     print("="*50 + "\n", flush=True)
 
+    # Full Evaluation on all official TREC metrics with best params
+    best_ce_blend = trial.params.get('ce_blend', 0.0)
+    best_xgb_params = {k: v for k, v in trial.params.items() if k != 'ce_blend'}
+    best_xgb_params['objective'] = 'rank:ndcg'
+    best_xgb_params['random_state'] = 42
+    best_xgb_params['n_jobs'] = -1
+    
+    final_oof_preds = evaluate_model(best_xgb_params, best_ce_blend)
+    
+    final_run_df = qrels_df_router.copy()
+    final_run_df['score'] = final_oof_preds
+    final_run_df.rename(columns={'llm_id': 'doc_id'}, inplace=True)
+    final_run_eval = final_run_df[['query_id', 'doc_id', 'score']].copy()
+    
+    full_metrics = [MRR, nDCG@10, nDCG@20]
+    agg_results = ir_measures.calc_aggregate(full_metrics, qrels_df_eval, final_run_eval)
+    
+    print("--- Final Official Evaluation Results ---", flush=True)
+    for metric, score in agg_results.items():
+        print(f"  {metric}: {score:.4f}", flush=True)
+
+    # Save official TREC run file
+    os.makedirs('results', exist_ok=True)
+    trec_records = []
+    final_run_df_export = qrels_df_router.copy()
+    final_run_df_export['predicted_score'] = final_oof_preds
+    for qid, group in final_run_df_export.groupby('query_id'):
+        group_sorted = group.sort_values(by='predicted_score', ascending=False)
+        for rank, (_, row) in enumerate(group_sorted.iterrows()):
+            trec_records.append({
+                'query_id': qid,
+                'Q0': 'Q0',
+                'llm_id': row['llm_id'],
+                'rank': rank + 1,
+                'score': row['predicted_score'],
+                'run_id': 'gemma_hybrid_l2r'
+            })
+    trec_df = pd.DataFrame(trec_records)
+    trec_df.to_csv('results/gemma_router_run.trec', sep=' ', index=False, header=False)
+    print("Saved official TREC run to results/gemma_router_run.trec", flush=True)
+
     import json
     results_data = {
-        'best_ndcg_20': float(trial.value),
+        'best_ndcg_20': float(agg_results[nDCG@20]),
+        'best_ndcg_10': float(agg_results[nDCG@10]),
+        'best_mrr': float(agg_results[MRR]),
         'best_params': trial.params
     }
     with open('results_gemma.json', 'w') as f:
