@@ -26,12 +26,13 @@ wheels/
 .installed.cfg
 *.egg
 
-# PyTorch & HuggingFace models/cache/weights
+# PyTorch & HuggingFace models/cache/weights/pickles
 *.pt
 *.pth
 *.bin
 *.safetensors
 *.checkpoint.pt
+*.pkl
 
 # Large dataset archives & raw data files (TREC benchmark)
 trec_data.zip
@@ -40,18 +41,20 @@ data/*
 !data/README.md
 !data/.gitkeep
 
+# Models directory
+models/*
+!models/README.md
+!models/.gitkeep
+
 # Evaluation run outputs (TREC run files)
 results/*.trec
 !results/README.md
+!results/ablation_summary.md
 !results/.gitkeep
 
 # Logs & temp files
 *.log
 scratch/
+
+# Internal assistant conversation state
 ai_conversation_context/
-
-# IDE & OS files
-.DS_Store
-.idea/
-.vscode/
-

@@ -1,0 +1,17 @@
+{
+    "best_ndcg_10": 0.3990136277866508,
+    "best_ndcg_20": 0.42174653000399104,
+    "best_mrr": 0.4326502912623905,
+    "best_map": 0.34570557820395753,
+    "best_p10": 0.1813664596273297,
+    "best_params": {
+        "n_estimators": 540,
+        "learning_rate": 0.07319037001398783,
+        "max_depth": 2,
+        "subsample": 0.8362275030789612,
+        "colsample_bytree": 0.6978976939975663,
+        "min_child_weight": 16,
+        "ce_blend": 0.023576657431690226,
+        "name_blend": 0.1865428823666253
+    }
+}
